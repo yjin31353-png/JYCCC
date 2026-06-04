@@ -10,7 +10,7 @@ from email.header import Header
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
 
-# ─── 强制清除 Python 进程的一切残留代理变量，实现绝对直连（用于登录校园网） ───
+# ─── 强制清除 Python 进程的一切残留代理变量 ───
 for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
     os.environ.pop(key, None)
 urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
@@ -25,7 +25,8 @@ AUTH_FILE = "../auth.json"
 def fetch_mubu_data():
     with sync_playwright() as p:
         has_auth = os.path.exists(AUTH_FILE)
-        browser = p.chromium.launch(headless=False, channel="msedge")
+        # 核心优化：采用无头模式并锁定 msedge 通道，完美适配合盖后台运行，绝不报错
+        browser = p.chromium.launch(headless=True, channel="msedge")
         context = browser.new_context(storage_state=AUTH_FILE if has_auth else None)
         page = context.new_page()
 
@@ -151,65 +152,27 @@ def send_mail(body):
             with smtplib.SMTP_SSL("smtp.qq.com", 465, context=qq_context) as server:
                 server.login(MY_EMAIL, SMTP_PASSWORD)
                 server.sendmail(MY_EMAIL, recipients, msg.as_string())
-            print("【成功】已通过 VPN 隧道成功群发至您的 QQ 邮箱和 谷歌邮箱！")
+            print("【成功】邮件投递成功！")
             return
         except Exception as e:
-            print(f"\n⚠️ 第 {attempt} 次投递因网络未稳失败: {e}")
+            print(f"\n⚠️ 第 {attempt} 次投递失败: {e}")
             if attempt < 3:
-                print("⏳ 触发自动缓冲，等待 6 秒后进行下一次尝试...")
                 time.sleep(6)
-    print("【失败】连续 3次 邮件投递均发生错误，请检查 VPN 节点状态。")
+    print("【失败】连续 3 次投递均发生错误，请检查当前网络连接。")
 
 
 if __name__ == "__main__":
-    # ─── 1. 核心修复：40秒高频震荡连网策略（操作间隔拉长至10秒） ───
-    print("【网络】正在启动 40 秒高频交替震荡连网机制（每秒刷新WiFi）...")
+    import ctypes
 
-    # 第 0~10 秒：开 VPN + 每秒持续刷 WiFi
-    print("【网络】[0-10s] 唤醒 VPN，同时每秒持续刷新 SCUNET 连接...")
-    os.system(r'start "" "C:\Users\Lenovo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\SakuraCat.lnk"')
-    for _ in range(10):
-        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
-        time.sleep(1)
-
-    # 第 10~20 秒：杀 VPN 清代理 + 每秒持续刷 WiFi
-    print("【网络】[10-20s] 强杀 VPN 释放代理，同时每秒持续刷新 SCUNET 连接...")
-    os.system("taskkill /f /im SakuraCat.exe >nul 2>&1")
-    os.system(r'reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1')
-    os.system("ipconfig /flushdns >nul 2>&1")
-    for _ in range(10):
-        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
-        time.sleep(1)
-
-    # 第 20~30 秒：再开 VPN + 每秒持续刷 WiFi
-    print("【网络】[20-30s] 再次唤醒 VPN，同时每秒持续刷新 SCUNET 连接...")
-    os.system(r'start "" "C:\Users\Lenovo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\SakuraCat.lnk"')
-    for _ in range(10):
-        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
-        time.sleep(1)
-
-    # 第 30~40 秒：最终杀 VPN 彻底洗白 + 每秒持续刷 WiFi
-    print("【网络】[30-40s] 最终强杀 VPN 洗白系统路由，全力锁定 SCUNET...")
-    os.system("taskkill /f /im SakuraCat.exe >nul 2>&1")
-    os.system(r'reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1')
-    os.system("ipconfig /flushdns >nul 2>&1")
-    for _ in range(10):
-        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
-        time.sleep(1)
-
-    # 进行校园网接口登录
-    print("【网络】正在通过 Eportal 接口自动登录认证...")
-    login_url = "http://192.168.2.135/eportal/InterFace.do?method=login"
-    params = {"userId": "2024141450249", "password": "010618", "service": "", "queryString": ""}
-    data = urllib.parse.urlencode(params).encode('utf-8')
+    # 1. 激活 Windows 内核防休眠锁与鼠标微动，保障无人值守任务畅通
     try:
-        req = urllib.request.Request(login_url, data=data, method="POST")
-        urllib.request.urlopen(req, timeout=10)
-        print("【成功】校园网认证完成，网络已就绪！")
+        ctypes.windll.user32.mouse_event(1, 1, 1, 0, 0)
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000001 | 0x00000001)
+        print("【系统】内核防休眠锁与防二次睡眠机制已双重激活...")
     except Exception as e:
-        print(f"【网络】校园网认证提示: {e}")
+        print(f"【系统】防休眠激活提示: {e}")
 
-    # ─── 2. 抓取与 AI 提炼 ───
+    # 2. 直接执行核心抓取与邮件投递
     print("正在启动幕布网页抓取程序...")
     html_content = fetch_mubu_data()
 
@@ -217,15 +180,13 @@ if __name__ == "__main__":
         print("正在调用 DeepSeek 智能提炼日报...")
         report = ai_clean(html_content)
 
-        # ─── 3. 发信前唤醒 VPN 并留足 30 秒缓冲 ───
-        print("【网络】任务即将完成，正在重新唤醒 SakuraCat VPN...")
-        os.system(r'start "" "C:\Users\Lenovo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\SakuraCat.lnk"')
-
-        for i in range(30, 0, -1):
-            print(f"\r⏳ 正在等待 VPN 建立安全连接并重写路由表，剩余 {i} 秒...", end="", flush=True)
-            time.sleep(1)
-        print("\n【网络】VPN 预留连通时间结束，开始投递邮件。")
-
         print("正在发送至您的邮箱...")
         send_mail(report)
-        print("全部完成！请检查您的邮箱。")
+        print("全部完成！")
+
+    # 3. 任务结束，主动释放防休眠锁
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+        print("【系统】释放防休眠锁，系统电源管理恢复默认。")
+    except:
+        pass
