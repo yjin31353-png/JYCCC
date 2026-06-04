@@ -1,6 +1,7 @@
 name: Daily Auto Run
 
 on:
+  workflow_dispatch: # ← 核心：加上这一行，就可以在网页上手动点击运行了！
   schedule:
     - cron: '0 4 * * *' # 北京时间每天中午 12:00 自动运行
 
@@ -17,4 +18,4 @@ jobs:
           python-version: '3.10'
 
       - name: Run script
-        run: mubu_project.py # 你的代码文件叫 test.py，这里已帮你配好
+        run: python mubu_project # 运行你的核心文件
