@@ -1,7 +1,7 @@
 name: Daily Auto Run
 
 on:
-  workflow_dispatch: # ← 核心：加上这一行，就可以在网页上手动点击运行了！
+  workflow_dispatch:
   schedule:
     - cron: '0 4 * * *' # 北京时间每天中午 12:00 自动运行
 
@@ -17,5 +17,13 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Install libraries
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright openai
+
+      - name: Install Playwright Browsers
+        run: playwright install --with-deps
+
       - name: Run script
-        run: python mubu_project # 运行你的核心文件
+        run: python mubu_project
