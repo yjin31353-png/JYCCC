@@ -1,0 +1,231 @@
+import os
+import ssl
+import time
+import datetime
+import smtplib
+import urllib.request
+import urllib.parse
+from email.mime.text import MIMEText
+from email.header import Header
+from playwright.sync_api import sync_playwright
+from openai import OpenAI
+
+# ─── 强制清除 Python 进程的一切残留代理变量，实现绝对直连（用于登录校园网） ───
+for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
+    os.environ.pop(key, None)
+urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
+
+# 配置参数
+DEEPSEEK_API_KEY = "sk-96f35dea257a44efa849b6daa4345109"
+MY_EMAIL = "2078337446@qq.com"
+SMTP_PASSWORD = "encpomslhmbkcbaj"
+AUTH_FILE = "../auth.json"
+
+
+def fetch_mubu_data():
+    with sync_playwright() as p:
+        has_auth = os.path.exists(AUTH_FILE)
+        browser = p.chromium.launch(headless=False, channel="msedge")
+        context = browser.new_context(storage_state=AUTH_FILE if has_auth else None)
+        page = context.new_page()
+
+        if not has_auth:
+            page.goto("https://mubu.com/login")
+            print("【重要】请扫码登录...")
+            time.sleep(35)
+            context.storage_state(path=AUTH_FILE)
+            browser.close()
+            return None
+
+        page.goto("https://mubu.com/app/folders/recent")
+        time.sleep(6)
+
+        sidebar_text = ""
+        for div in page.locator("div").all():
+            try:
+                text = div.inner_text()
+                if "今日速记" in text and "最近编辑" in text and "快速访问" in text:
+                    if not sidebar_text or len(text) < len(sidebar_text):
+                        sidebar_text = text
+            except Exception:
+                continue
+
+        if not sidebar_text:
+            sidebar_text = page.locator("body").inner_text()
+
+        lines = [line.strip() for line in sidebar_text.split("\n") if line.strip()]
+
+        today = datetime.date.today()
+        stop_date = today - datetime.timedelta(days=4)
+        stop_signals = [
+            f"{stop_date.month}.{stop_date.day}",
+            f"{stop_date.month}月{stop_date.day}日",
+            stop_date.strftime("%m-%d")
+        ]
+        print(f"📅 今日日期: {today.month}.{today.day} | 扫描到以下边界将自动停止: {stop_signals}")
+
+        target_files = []
+        start_collecting = False
+        for line in lines:
+            if line == "最近编辑":
+                start_collecting = True
+                continue
+            if start_collecting:
+                if line == "快速访问":
+                    break
+                if line in ["今日速记", "我的文档", "教育特惠", "立即认证", "教育特惠买一赠一"]:
+                    continue
+
+                if line in stop_signals:
+                    print(f"🛑 已触发时间边界线 [{line}]，停止向下收集（不抓取该文件）。")
+                    break
+
+                if line not in target_files:
+                    target_files.append(line)
+
+        print(f" 成功动态锁定前四天文件列表: {target_files}")
+
+        all_notes_text = ""
+        for file_name in target_files:
+            try:
+                page.goto("https://mubu.com/app/folders/recent")
+                time.sleep(4)
+
+                file_element = page.get_by_text(file_name, exact=True).first
+                if file_element.is_visible():
+                    print(f"👉 正在自动点击打开: {file_name}")
+                    file_element.click()
+                    time.sleep(5)
+
+                    doc_content = page.locator("body").inner_text()
+                    all_notes_text += f"\n\n--- 文档: {file_name} ---\n{doc_content}"
+                    print(f" 成功抓取 [{file_name}] 的全部笔记内容")
+            except Exception as e:
+                print(f" 抓取 {file_name} 失败，自动跳过: {e}")
+                continue
+
+        browser.close()
+        return all_notes_text
+
+
+def ai_clean(text):
+    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+    response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system",
+             "content": (
+                 "你温柔体贴活泼有趣，用第二人称，像哥哥看弟弟的日记一样，给我写一封信"
+                 "请帮我剔除网页菜单、按钮等系统垃圾信息，提取有效笔记内容，并按照以下格式整理输出：\n\n"
+                 "核心格式要求：\n"
+                 "1. 输出内容必须严格且仅分为以下三个部分，标题必须用【】括起来：\n"
+                 "【开心的事】\n"
+                 "【收获，思考和灵感】\n"
+                 "【不足之处】\n"
+                 "2. 分条回答，长度根据实际内容决定。在结尾给我说一两句你想跟我说的话\n"
+                 "3. 全文绝对不能包含任何粗体字（严禁使用 ** 标记）。"
+             )},
+            {"role": "user", "content": text[:30000]}
+        ]
+    )
+    return response.choices[0].message.content
+
+
+def send_mail(body):
+    qq_context = ssl.create_default_context()
+    qq_context.maximum_version = ssl.TLSVersion.TLSv1_2
+
+    gm_email = "yjin31353@gmail.com"
+    recipients = [MY_EMAIL, gm_email]
+
+    today = datetime.date.today()
+    mail_title = f"【早啊小羽】{today.month}.{today.day}要开心哦"
+
+    msg = MIMEText(body, 'plain', 'utf-8')
+    msg['From'] = MY_EMAIL
+    msg['To'] = f"{MY_EMAIL}, {gm_email}"
+    msg['Subject'] = Header(mail_title, 'utf-8')
+
+    for attempt in range(1, 4):
+        try:
+            with smtplib.SMTP_SSL("smtp.qq.com", 465, context=qq_context) as server:
+                server.login(MY_EMAIL, SMTP_PASSWORD)
+                server.sendmail(MY_EMAIL, recipients, msg.as_string())
+            print("【成功】已通过 VPN 隧道成功群发至您的 QQ 邮箱和 谷歌邮箱！")
+            return
+        except Exception as e:
+            print(f"\n⚠️ 第 {attempt} 次投递因网络未稳失败: {e}")
+            if attempt < 3:
+                print("⏳ 触发自动缓冲，等待 6 秒后进行下一次尝试...")
+                time.sleep(6)
+    print("【失败】连续 3次 邮件投递均发生错误，请检查 VPN 节点状态。")
+
+
+if __name__ == "__main__":
+    # ─── 1. 核心修复：40秒高频震荡连网策略（操作间隔拉长至10秒） ───
+    print("【网络】正在启动 40 秒高频交替震荡连网机制（每秒刷新WiFi）...")
+
+    # 第 0~10 秒：开 VPN + 每秒持续刷 WiFi
+    print("【网络】[0-10s] 唤醒 VPN，同时每秒持续刷新 SCUNET 连接...")
+    os.system(r'start "" "C:\Users\Lenovo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\SakuraCat.lnk"')
+    for _ in range(10):
+        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
+        time.sleep(1)
+
+    # 第 10~20 秒：杀 VPN 清代理 + 每秒持续刷 WiFi
+    print("【网络】[10-20s] 强杀 VPN 释放代理，同时每秒持续刷新 SCUNET 连接...")
+    os.system("taskkill /f /im SakuraCat.exe >nul 2>&1")
+    os.system(r'reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1')
+    os.system("ipconfig /flushdns >nul 2>&1")
+    for _ in range(10):
+        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
+        time.sleep(1)
+
+    # 第 20~30 秒：再开 VPN + 每秒持续刷 WiFi
+    print("【网络】[20-30s] 再次唤醒 VPN，同时每秒持续刷新 SCUNET 连接...")
+    os.system(r'start "" "C:\Users\Lenovo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\SakuraCat.lnk"')
+    for _ in range(10):
+        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
+        time.sleep(1)
+
+    # 第 30~40 秒：最终杀 VPN 彻底洗白 + 每秒持续刷 WiFi
+    print("【网络】[30-40s] 最终强杀 VPN 洗白系统路由，全力锁定 SCUNET...")
+    os.system("taskkill /f /im SakuraCat.exe >nul 2>&1")
+    os.system(r'reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v ProxyEnable /t REG_DWORD /d 0 /f >nul 2>&1')
+    os.system("ipconfig /flushdns >nul 2>&1")
+    for _ in range(10):
+        os.system('netsh wlan connect name="SCUNET" >nul 2>&1')
+        time.sleep(1)
+
+    # 进行校园网接口登录
+    print("【网络】正在通过 Eportal 接口自动登录认证...")
+    login_url = "http://192.168.2.135/eportal/InterFace.do?method=login"
+    params = {"userId": "2024141450249", "password": "010618", "service": "", "queryString": ""}
+    data = urllib.parse.urlencode(params).encode('utf-8')
+    try:
+        req = urllib.request.Request(login_url, data=data, method="POST")
+        urllib.request.urlopen(req, timeout=10)
+        print("【成功】校园网认证完成，网络已就绪！")
+    except Exception as e:
+        print(f"【网络】校园网认证提示: {e}")
+
+    # ─── 2. 抓取与 AI 提炼 ───
+    print("正在启动幕布网页抓取程序...")
+    html_content = fetch_mubu_data()
+
+    if html_content:
+        print("正在调用 DeepSeek 智能提炼日报...")
+        report = ai_clean(html_content)
+
+        # ─── 3. 发信前唤醒 VPN 并留足 30 秒缓冲 ───
+        print("【网络】任务即将完成，正在重新唤醒 SakuraCat VPN...")
+        os.system(r'start "" "C:\Users\Lenovo\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\SakuraCat.lnk"')
+
+        for i in range(30, 0, -1):
+            print(f"\r⏳ 正在等待 VPN 建立安全连接并重写路由表，剩余 {i} 秒...", end="", flush=True)
+            time.sleep(1)
+        print("\n【网络】VPN 预留连通时间结束，开始投递邮件。")
+
+        print("正在发送至您的邮箱...")
+        send_mail(report)
+        print("全部完成！请检查您的邮箱。")
